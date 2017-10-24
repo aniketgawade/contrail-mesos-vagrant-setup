@@ -1,12 +1,14 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
-num_of_slaves = 1
-prefix_ip_addr = "174.10.100."
+num_of_slaves = 2
+prefix_ip_addr = "174.10.10."
 tag_version = 6
 stable_contrail_ansible_sha = "47a025d8bbef129baf4455fe69ad8cc5d8ceb2eb"
 #mesos_github_username = "username"
 #mesos_github_password = "password"
+mesos_github_username = "aniketgawade"
+mesos_github_password = ""
 
 Vagrant.configure("2") do |config|
     config.vm.box = "centos/7"
@@ -17,7 +19,8 @@ Vagrant.configure("2") do |config|
     #Setup ip's for everyone
     builder_ip = "%s100" % [prefix_ip_addr]
     controller_ip = "%s101" % [prefix_ip_addr]
-    slaves_ip = "%s102" % [prefix_ip_addr]
+    mesos_master_ip = "%s102" % [prefix_ip_addr]
+    #slaves_ip = "%s102" % [prefix_ip_addr]
     slaves_ip_string = ""
     cntr = 1
     until cntr > (num_of_slaves - 1)  do
@@ -25,6 +28,13 @@ Vagrant.configure("2") do |config|
         cntr = cntr + 1
     end
     slaves_ip_string.concat("#{prefix_ip_addr}#{101+num_of_slaves}")
+
+    mesos_slaves_ip_string = ""
+    cntr = 1
+    until cntr > (num_of_slaves)  do
+        mesos_slaves_ip_string.concat("#{prefix_ip_addr}#{101+cntr} ")
+        cntr = cntr + 1
+    end
 
     # Setup controller
     config.vm.define :controller do |controller|
@@ -50,33 +60,43 @@ EOF
     end
 
     # Setup slaves
-    config.vm.define :slave do |slave|
-        slave.vm.hostname = "slave"
-        slave.vm.network :private_network, ip: slaves_ip
-        #slave.vm.synced_folder "slave/", "/home/vagrant/sync"
-        slave.vm.provider "virtualbox" do |v|
-            v.memory = 1024 * 16
-            v.cpus = 8
-            v.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
-            v.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
-        end
-        slave.vm.network "forwarded_port", guest: 8880, host: 8880
-        slave.vm.network "forwarded_port", guest: 8881, host: 8881
-        slave.vm.network "forwarded_port", guest: 8882, host: 8882
-        slave.vm.provision 'shell', :inline => <<EOF
- 
-        # Setup passless access
-        mkdir -p /root/.ssh
-        cat /vagrant/slaves/id_rsa.pub >> /root/.ssh/authorized_keys
-        yum upgrade -y
-        yum install kernel-headers kernel-devel -y
-        cp /vagrant/builder/get-pip.py /home/vagrant/get-pip.py
-        sudo python /home/vagrant/get-pip.py
-        pip install pyroute2==0.4.13
-        yum install net-tools -y
-EOF
-    end
+    #cntr = 1
+    #until cntr > (num_of_slaves)  do
+    (1..num_of_slaves).each do |cntr|
+        slave_name = "slave#{101+cntr}"
+        config.vm.define slave_name do |host|
+            host.vm.hostname = slave_name
+            slave_ip = "#{prefix_ip_addr}#{101+cntr}"
+            host.vm.network :private_network, ip: slave_ip
+            #host.vm.synced_folder "slave/", "/home/vagrant/sync"
+            host.vm.provider "virtualbox" do |v|
+                v.memory = 1024 * 16
+                v.cpus = 8
+                v.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+                v.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+            end
 
+            if cntr == 1
+                host.vm.network "forwarded_port", guest: 8880, host: 8880
+                host.vm.network "forwarded_port", guest: 8881, host: 8881
+                host.vm.network "forwarded_port", guest: 8882, host: 8882
+            end
+
+        host.vm.provision 'shell', :inline => <<EOF
+            # Setup passless access
+            mkdir -p /root/.ssh
+            cat /vagrant/slaves/id_rsa.pub >> /root/.ssh/authorized_keys
+            yum upgrade -y
+            yum install kernel-headers kernel-devel -y
+            cp /vagrant/builder/get-pip.py /home/vagrant/get-pip.py
+            sudo python /home/vagrant/get-pip.py
+            pip install pyroute2==0.4.13
+            yum install net-tools -y
+            cp /vagrant/slaves/change_ip.sh /home/vagrant/change_ip.sh
+EOF
+        end
+        #cntr = cntr + 1
+    end
     # Setup builder
     config.vm.define :builder do |builder|
         builder.vm.hostname = "builder"
@@ -109,6 +129,7 @@ EOF
             sudo yum install gcc -y
             sudo yum install openssl-devel -y
             sudo yum install python-devel -y
+            sudo yum install python-cffi -y
             sudo pip install ansible==2.2.0
 
             # Setup passless access
@@ -135,6 +156,7 @@ EOF
 
             # Copy inventory file
             cp /vagrant/builder/mesos-inventory.ini /home/vagrant/contrail-mesos-ansible/playbooks/inventory/mesos-inventory.ini
+            sed -i $'s/10.10.10.10/#{mesos_master_ip}/g' /home/vagrant/contrail-mesos-ansible/playbooks/inventory/mesos-inventory.ini
             sed -i $'s/20.20.20.20/#{slaves_ip_string}/g' /home/vagrant/contrail-mesos-ansible/playbooks/inventory/mesos-inventory.ini
             cd /home/vagrant/contrail-mesos-ansible/playbooks
             time ansible-playbook -vvv -i inventory/mesos-inventory.ini all.yml
@@ -143,10 +165,16 @@ EOF
         builder.vm.provision 'shell', :inline => <<EOF
         # Configuring link local
             ssh root@#{controller_ip} 'docker exec -i controller /opt/contrail/utils/provision_linklocal.py --api_server_ip #{controller_ip} --linklocal_service_name mesos --linklocal_service_ip 169.254.169.1 --linklocal_service_port 8882 --ipfabric_service_ip 127.0.0.1 --ipfabric_service_port 8882'
+EOF
 
         #Setting route for 8.8.8.8 so that mesos will pick related ip
-        cp /vagrant/slave/change_ip.sh /home/vagrant/change_ip.sh
-        ssh root@#{slaves_ip} 'sh /home/vagrant/change_ip.sh'
+        #cntr = 1
+        #until cntr > (num_of_slaves)  do
+        (1..num_of_slaves).each do |cntr|
+            slave_ip = "#{prefix_ip_addr}#{101+cntr}"
+            builder.vm.provision 'shell', :inline => <<EOF
+                ssh root@#{slave_ip} 'sh /home/vagrant/change_ip.sh'
 EOF
+        end
     end
 end
